@@ -77,7 +77,9 @@ app.use('/api', dashboardRouter); // /api/bookings, /api/dashboard/*
 app.use('/api/onboarding', onboardingRouter); // /api/onboarding/import_from_web
 
 const port = Number(process.env.PORT ?? 8787);
-app.listen(port, () => {
-  console.log(`[iva-backend] listening on http://localhost:${port}`);
+const host = '0.0.0.0';
+app.listen(port, host, () => {
+  console.log(`[iva-backend] listening on http://${host}:${port}`);
+  console.log(`[iva-backend] resolved PORT=${port}, HOST=${host}`);
 });
 
