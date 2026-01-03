@@ -21,12 +21,27 @@ const app = express();
 app.use(express.json({ limit: MAX_BODY_SIZE_BYTES }));
 app.use(express.urlencoded({ extended: true, limit: MAX_BODY_SIZE_BYTES }));
 
-if (process.env.CORS_ORIGINS) {
-  app.use(
-    cors({
-      origin: process.env.CORS_ORIGINS.split(',').map((o) => o.trim()),
-    })
-  );
+const allowedOrigins = process.env.CORS_ORIGINS
+  ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+  : [];
+
+if (allowedOrigins.length > 0) {
+  const corsOptions = {
+    origin(origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('CORS origin not allowed'));
+    },
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    credentials: true,
+  };
+
+  app.use(cors(corsOptions));
+  app.options('*', cors(corsOptions));
 }
 
 // Dev-only debug endpoint: test "To" extraction without DB.
