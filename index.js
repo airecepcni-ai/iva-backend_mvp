@@ -8,6 +8,13 @@ import onboardingRouter from './routes/onboarding.js';
 import { extractCalledNumberDetailed, normalizeE164Like } from './lib/tenantResolver.js';
 
 const MAX_BODY_SIZE_BYTES = 4.5 * 1024 * 1024;
+const COMMIT_SHA =
+  process.env.COMMIT_SHA ||
+  process.env.GITHUB_SHA ||
+  process.env.REVISION ||
+  process.env.SOURCE_COMMIT ||
+  'unknown';
+const BUILD_TIMESTAMP = process.env.BUILD_TIMESTAMP || new Date().toISOString();
 
 function isDebugEnabled() {
   if (process.env.ENABLE_DEBUG_RESOLVE_TENANT === 'true') return true;
@@ -26,6 +33,31 @@ const fromEnvOrigins = process.env.CORS_ORIGINS
   ? process.env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
   : [];
 const allowedOrigins = Array.from(new Set([...fromEnvOrigins, ...defaultTrustedOrigins]));
+// ---- deploy sanity ----
+const STARTED_AT = new Date().toISOString();
+
+function getCommitSha() {
+  // Railway (most common), GitHub Actions, generic build systems
+  return (
+    process.env.RAILWAY_GIT_COMMIT_SHA ||
+    process.env.RAILWAY_GIT_COMMIT ||
+    process.env.GITHUB_SHA ||
+    process.env.SOURCE_VERSION ||
+    process.env.VERCEL_GIT_COMMIT_SHA ||
+    null
+  );
+}
+
+app.get('/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    service: 'iva-backend',
+    sha: getCommitSha(),
+    startedAt: STARTED_AT,
+    node: process.version,
+  });
+});
 
 const corsOptions = {
   origin(origin, callback) {
@@ -85,6 +117,13 @@ app.get('/api/debug/extract-to', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'iva-backend' });
+});
+
+app.get('/version', (req, res) => {
+  res.json({
+    commit: COMMIT_SHA,
+    timestamp: BUILD_TIMESTAMP,
+  });
 });
 
 app.use('/vapi', vapiRouter); // /vapi/webhook
