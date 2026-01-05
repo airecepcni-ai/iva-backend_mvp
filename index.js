@@ -48,17 +48,6 @@ function getCommitSha() {
   );
 }
 
-app.get('/version', (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  res.json({
-    ok: true,
-    service: 'iva-backend',
-    sha: getCommitSha(),
-    startedAt: STARTED_AT,
-    node: process.version,
-  });
-});
-
 const corsOptions = {
   origin(origin, callback) {
     if (!origin) {
@@ -71,11 +60,24 @@ const corsOptions = {
   },
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-tenant-id'],
 };
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+app.get('/version', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    service: 'iva-backend',
+    sha: getCommitSha(),
+    startedAt: STARTED_AT,
+    node: process.version,
+    commit: COMMIT_SHA,
+    timestamp: BUILD_TIMESTAMP,
+  });
+});
 
 // Dev-only debug endpoint: test "To" extraction without DB.
 // Usage:
@@ -117,13 +119,6 @@ app.get('/api/debug/extract-to', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, service: 'iva-backend' });
-});
-
-app.get('/version', (req, res) => {
-  res.json({
-    commit: COMMIT_SHA,
-    timestamp: BUILD_TIMESTAMP,
-  });
 });
 
 app.use('/vapi', vapiRouter); // /vapi/webhook
