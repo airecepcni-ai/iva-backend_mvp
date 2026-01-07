@@ -280,8 +280,32 @@ export async function crawlWebsiteWithPlaywright({
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     });
   } catch (err) {
-    console.error('[CRAWL] Playwright launch failed:', err);
-    throw new Error(`PLAYWRIGHT_MISSING: ${err?.message || String(err)}`);
+    const msg = err?.message || String(err);
+    console.error('[CRAWL] Playwright launch failed (bundled chromium):', msg);
+
+    // Railway/Nixpacks can miss shared libs for Playwright's bundled headless_shell.
+    // If this happens, retry using system chromium (provided by Nixpacks) via PATH.
+    const looksLikeMissingLib =
+      msg.includes('error while loading shared libraries') ||
+      msg.includes('libglib-2.0.so.0') ||
+      msg.includes('exitCode=127');
+
+    if (looksLikeMissingLib) {
+      console.warn('[CRAWL] Retrying with system chromium from PATH (executablePath="chromium")');
+      try {
+        browser = await chromium.launch({
+          headless: true,
+          executablePath: 'chromium',
+          args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        });
+      } catch (err2) {
+        const msg2 = err2?.message || String(err2);
+        console.error('[CRAWL] Playwright launch failed (system chromium):', msg2);
+        throw new Error(`PLAYWRIGHT_MISSING: ${msg2}`);
+      }
+    } else {
+      throw new Error(`PLAYWRIGHT_MISSING: ${msg}`);
+    }
   }
 
   const context = await browser.newContext({

@@ -2,7 +2,9 @@
 # Ensures Playwright Chromium browser is installed at build time
 
 [phases.setup]
-nixPkgs = ["nodejs_20", "chromium", "libnss3", "libatk-bridge2.0-0", "libcups2", "libdrm2", "libxkbcommon0", "libxcomposite1", "libxdamage1", "libxrandr2", "libgbm1", "libasound2"]
+# NOTE: These must be valid Nix package names (not Debian/apt package names).
+# Keep this minimal: Nix chromium brings its runtime deps (incl. glib) and is usable via PATH.
+nixPkgs = ["nodejs_20", "chromium", "glib"]
 
 [phases.install]
 cmds = [

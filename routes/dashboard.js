@@ -30,9 +30,11 @@ router.get('/business_profile', async (req, res) => {
     console.log('[DASHBOARD] GET /api/business_profile', { tenantId });
 
     // Fetch business subscription state (may be missing)
+    // NOTE: Some deployments don't have stripe_* columns in businesses table.
+    // Only select columns we know exist.
     const { data: businessRow, error: businessError } = await supabase
       .from('businesses')
-      .select('id, is_subscribed, stripe_status, stripe_subscription_status, stripe_current_period_end')
+      .select('id, is_subscribed')
       .eq('id', tenantId)
       .maybeSingle();
 
@@ -111,9 +113,9 @@ router.get('/business_profile', async (req, res) => {
       subscription: {
         isSubscribed: computeIsSubscribed(businessRow),
         is_subscribed: businessRow?.is_subscribed === true,
-        stripeStatus: businessRow?.stripe_status || null,
-        stripeSubscriptionStatus: businessRow?.stripe_subscription_status || null,
-        stripeCurrentPeriodEnd: businessRow?.stripe_current_period_end || null,
+        stripeStatus: null,
+        stripeSubscriptionStatus: null,
+        stripeCurrentPeriodEnd: null,
       },
     });
   } catch (err) {
