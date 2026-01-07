@@ -1,6 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import fs from 'node:fs';
+import { chromium } from 'playwright';
 
 import vapiRouter from './routes/vapi.js';
 import dashboardRouter from './routes/dashboard.js';
@@ -24,6 +26,36 @@ function isDebugEnabled() {
 }
 
 const app = express();
+
+// ---- Playwright browser check ----
+const playwrightBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH || "0";
+process.env.PLAYWRIGHT_BROWSERS_PATH = playwrightBrowsersPath;
+
+let playwrightExecutablePath = null;
+let playwrightExecutableExists = false;
+let playwrightError = null;
+
+try {
+  playwrightExecutablePath = chromium.executablePath();
+  playwrightExecutableExists = fs.existsSync(playwrightExecutablePath);
+} catch (err) {
+  playwrightError = err?.message || String(err);
+  console.error("[iva-backend] ❌ Playwright executable check failed:", playwrightError);
+}
+
+console.log("[iva-backend] 🎭 Playwright startup check:", {
+  PLAYWRIGHT_BROWSERS_PATH: playwrightBrowsersPath,
+  executablePath: playwrightExecutablePath,
+  exists: playwrightExecutableExists,
+  error: playwrightError,
+});
+
+if (!playwrightExecutableExists) {
+  console.warn("[iva-backend] ⚠️ Playwright Chromium executable NOT FOUND. Crawling will fail.");
+  console.warn("[iva-backend] ⚠️ Ensure 'npx playwright install chromium' runs during build.");
+} else {
+  console.log("[iva-backend] ✅ Playwright Chromium executable found and ready.");
+}
 
 app.use(express.json({ limit: MAX_BODY_SIZE_BYTES }));
 app.use(express.urlencoded({ extended: true, limit: MAX_BODY_SIZE_BYTES }));

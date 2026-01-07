@@ -5,6 +5,13 @@ import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 import { XMLParser } from 'fast-xml-parser';
 
+const DEBUG_CRAWL = process.env.DEBUG_CRAWL === 'true';
+const logCrawl = (...args) => {
+  if (DEBUG_CRAWL) {
+    console.log('[CRAWL]', ...args);
+  }
+};
+
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -254,14 +261,28 @@ export async function crawlWebsiteWithPlaywright({
     enqueue(sUrl, 1, false);
   }
 
-  console.log('[CRAWL] Initial queue size:', queue.length);
+  logCrawl('Initial queue size and settings', {
+    queueLength: queue.length,
+    maxDepth,
+    maxPages,
+    baseUrl,
+  });
 
   // Launch browser (one per crawl)
   console.log('🚀 Launching Playwright browser...');
-  const browser = await chromium.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+  if (DEBUG_CRAWL) {
+    logCrawl('Chromium executable path', chromium.executablePath());
+  }
+  let browser;
+  try {
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+  } catch (err) {
+    console.error('[CRAWL] Playwright launch failed:', err);
+    throw new Error(`PLAYWRIGHT_MISSING: ${err?.message || String(err)}`);
+  }
 
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

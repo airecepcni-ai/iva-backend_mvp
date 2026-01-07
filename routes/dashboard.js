@@ -2,6 +2,7 @@ import express from 'express';
 import { supabase } from '../lib/supabaseClient.js';
 import { DateTime } from 'luxon';
 import { handleUpdateAppointment, handleBookAppointment } from '../lib/appointments.js';
+import { computeIsSubscribed } from '../lib/subscription.js';
 
 const router = express.Router();
 
@@ -17,6 +18,8 @@ router.get('/business_profile', async (req, res) => {
   try {
     const tenantId = req.headers['x-tenant-id'];
 
+    res.set('Cache-Control', 'no-store');
+
     if (!tenantId || typeof tenantId !== 'string') {
       return res.status(400).json({
         error: 'MISSING_TENANT_ID',
@@ -25,6 +28,17 @@ router.get('/business_profile', async (req, res) => {
     }
 
     console.log('[DASHBOARD] GET /api/business_profile', { tenantId });
+
+    // Fetch business subscription state (may be missing)
+    const { data: businessRow, error: businessError } = await supabase
+      .from('businesses')
+      .select('id, is_subscribed, stripe_status, stripe_subscription_status, stripe_current_period_end')
+      .eq('id', tenantId)
+      .maybeSingle();
+
+    if (businessError) {
+      console.error('[DASHBOARD] business subscription fetch error', businessError);
+    }
 
     // Fetch business_profile
     const { data: profileData, error: profileError } = await supabase
@@ -93,7 +107,14 @@ router.get('/business_profile', async (req, res) => {
       profile,
       services,
       openingHours,
-      locations: [], // Not implemented yet
+      locations: [],
+      subscription: {
+        isSubscribed: computeIsSubscribed(businessRow),
+        is_subscribed: businessRow?.is_subscribed === true,
+        stripeStatus: businessRow?.stripe_status || null,
+        stripeSubscriptionStatus: businessRow?.stripe_subscription_status || null,
+        stripeCurrentPeriodEnd: businessRow?.stripe_current_period_end || null,
+      },
     });
   } catch (err) {
     console.error('[DASHBOARD] GET /api/business_profile unexpected error:', err);
@@ -233,7 +254,7 @@ router.get('/bookings', async (req, res) => {
     // Build query - try with original_date first, fallback if column doesn't exist
     let query = supabase
       .from('bookings')
-      .select('id, service_slug, client_name, client_phone, location, date, time, duration_minutes, status, calendar_event_id, original_date')
+      .select('id, service_slug, client_name, client_phone, location, date, time, duration_minutes, status, calendar_event_id')
       .eq('business_id', tenantId)
       .gte('date', fromDate)
       .lte('date', toDate)
@@ -247,39 +268,7 @@ router.get('/bookings', async (req, res) => {
       query = query.eq('status', statusFilter);
     }
 
-    let { data: rows, error } = await query;
-
-    // If error is due to missing original_date column, retry without it
-    if (error) {
-      const errorMsg = String(error.message || '');
-      const errorCode = String(error.code || '');
-      // Check for column not found errors (Supabase returns various error codes/messages)
-      const isColumnError = errorMsg.includes('original_date') || 
-                           errorCode === 'PGRST116' || 
-                           (errorMsg.includes('column') && errorMsg.includes('does not exist')) ||
-                           errorMsg.includes('Could not find');
-      
-      if (isColumnError) {
-        console.warn('[DASHBOARD] original_date column not found, retrying without it. Error:', error);
-        query = supabase
-          .from('bookings')
-          .select('id, service_slug, client_name, client_phone, location, date, time, duration_minutes, status, calendar_event_id')
-          .eq('business_id', tenantId)
-          .gte('date', fromDate)
-          .lte('date', toDate)
-          .order('date', { ascending: true })
-          .order('time', { ascending: true })
-          .limit(limit);
-
-        if (statusFilter && statusFilter !== 'rescheduled' && statusFilter !== 'all') {
-          query = query.eq('status', statusFilter);
-        }
-
-        const retryResult = await query;
-        rows = retryResult.data;
-        error = retryResult.error;
-      }
-    }
+    const { data: rows, error } = await query;
 
     // Handle Supabase query errors
     if (error) {
@@ -313,7 +302,7 @@ router.get('/bookings', async (req, res) => {
         durationMinutes: row.duration_minutes ?? null,
         status: row.status || '',
         calendarEventId: row.calendar_event_id || null,
-        originalDate: row.original_date ?? null, // Will be null if column doesn't exist
+        originalDate: row.original_date ?? row.date ?? null,
       };
     });
 

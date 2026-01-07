@@ -112,6 +112,14 @@ router.post('/import_from_web', async (req, res) => {
       const errorMessage = crawlError?.message || String(crawlError);
       console.error('[ONBOARDING] Crawl error:', errorMessage);
 
+      if (errorMessage.includes('PLAYWRIGHT_MISSING')) {
+        return res.status(503).json({
+          success: false,
+          error: 'PLAYWRIGHT_MISSING',
+          message_cs: 'Spouštění Playwright pro crawling je momentálně nedostupné. Zkuste to prosím za chvíli.',
+        });
+      }
+
       if (errorMessage.includes('INVALID_URL')) {
         return res.status(400).json({
           success: false,

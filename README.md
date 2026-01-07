@@ -112,11 +112,30 @@ Re-indexace všech zdrojů tenanta.
 }
 ```
 
+## Railway Deployment
+
+Pro nasazení na Railway je potřeba nastavit tyto proměnné prostředí:
+
+### Povinné
+- `PLAYWRIGHT_BROWSERS_PATH=0` - Nutné pro správné fungování Playwright v kontejneru
+
+### Volitelné
+- `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD` - NESMÍ být nastaveno na `true`
+- `DEBUG_CRAWL=true` - Zapne podrobné logování crawleru
+- `DEBUG_SUBSCRIPTION=true` - Zapne logování subscription stavu
+
+### Automatická instalace
+`nixpacks.toml` zajišťuje automatickou instalaci Chromium browseru při buildu.
+Pokud crawl selhává s "Executable doesn't exist", zkontrolujte:
+1. Zda `PLAYWRIGHT_BROWSERS_PATH=0` je nastaveno
+2. Zda postinstall script proběhl úspěšně v build logu
+
 ## Poznámky
 
 - Backend používá Service Role klíč pro přístup k Supabase
 - Text je rozdělen na chunky ~900 znaků s overlap 150 znaků
 - Pro produkci doporučujeme přidat autentizaci a rate limiting
+- Playwright Chromium se instaluje automaticky při `npm install` (postinstall hook)
 
 
 

@@ -15,3 +15,4 @@ CREATE INDEX IF NOT EXISTS idx_services_is_bookable ON services(business_id, is_
 
 
 
+
