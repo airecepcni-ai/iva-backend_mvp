@@ -52,10 +52,18 @@ router.post('/import_from_web', async (req, res) => {
       });
     }
 
-    // Validate URL format
+    // Normalize and validate URL format
+    // Auto-prepend https:// if no protocol is provided
+    let normalizedUrl = url.trim();
+    if (!/^https?:\/\//i.test(normalizedUrl)) {
+      // Remove leading www. for cleaner normalization, then add https://
+      normalizedUrl = normalizedUrl.replace(/^www\./i, '');
+      normalizedUrl = `https://${normalizedUrl}`;
+    }
+    
     let parsedUrl;
     try {
-      parsedUrl = new URL(url.trim());
+      parsedUrl = new URL(normalizedUrl);
       if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
         throw new Error('Invalid protocol');
       }
@@ -63,7 +71,7 @@ router.post('/import_from_web', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'INVALID_URL',
-        message_cs: 'Zadejte prosím platnou URL adresu (např. https://example.com).',
+        message_cs: 'Zadejte prosím platnou URL adresu (např. example.com nebo https://example.com).',
       });
     }
 
