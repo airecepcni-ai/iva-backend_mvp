@@ -283,27 +283,34 @@ export async function crawlWebsiteWithPlaywright({
     const msg = err?.message || String(err);
     console.error('[CRAWL] Playwright launch failed (bundled chromium):', msg);
 
-    // Railway/Nixpacks can miss shared libs for Playwright's bundled headless_shell.
-    // If this happens, retry using system chromium (provided by Nixpacks) via PATH.
-    const looksLikeMissingLib =
-      msg.includes('error while loading shared libraries') ||
-      msg.includes('libglib-2.0.so.0') ||
-      msg.includes('exitCode=127');
+    // Railway/Nixpacks can miss shared libs for Playwright's bundled headless_shell, and Playwright
+    // sometimes only surfaces a generic "Target page... has been closed" error.
+    // To be robust, always attempt a fallback launch using a system-installed chromium.
+    const candidates = [
+      process.env.CHROMIUM_PATH,
+      'chromium',
+      'chromium-browser',
+      '/usr/bin/chromium',
+      '/usr/bin/chromium-browser',
+    ].filter(Boolean);
 
-    if (looksLikeMissingLib) {
-      console.warn('[CRAWL] Retrying with system chromium from PATH (executablePath="chromium")');
+    for (const candidate of candidates) {
+      console.warn(`[CRAWL] Fallback: retrying launch with system chromium (executablePath="${candidate}")`);
       try {
         browser = await chromium.launch({
           headless: true,
-          executablePath: 'chromium',
+          executablePath: candidate,
           args: ['--no-sandbox', '--disable-setuid-sandbox'],
         });
+        console.log(`[CRAWL] ✅ Launched using system chromium: ${candidate}`);
+        break;
       } catch (err2) {
         const msg2 = err2?.message || String(err2);
-        console.error('[CRAWL] Playwright launch failed (system chromium):', msg2);
-        throw new Error(`PLAYWRIGHT_MISSING: ${msg2}`);
+        console.error(`[CRAWL] Fallback launch failed for "${candidate}":`, msg2);
       }
-    } else {
+    }
+
+    if (!browser) {
       throw new Error(`PLAYWRIGHT_MISSING: ${msg}`);
     }
   }
