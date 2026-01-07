@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 import { XMLParser } from 'fast-xml-parser';
+import { execFileSync } from 'node:child_process';
 
 const DEBUG_CRAWL = process.env.DEBUG_CRAWL === 'true';
 const logCrawl = (...args) => {
@@ -11,6 +12,27 @@ const logCrawl = (...args) => {
     console.log('[CRAWL]', ...args);
   }
 };
+
+function resolveExecutablePath(cmdOrPath) {
+  if (!cmdOrPath) return null;
+  const value = String(cmdOrPath).trim();
+  if (!value) return null;
+
+  // Absolute/relative path provided
+  if (value.includes('/') || value.includes('\\')) {
+    return fs.existsSync(value) ? value : null;
+  }
+
+  // Resolve from PATH (Linux containers)
+  try {
+    const resolved = execFileSync('which', [value], { encoding: 'utf8' }).trim();
+    if (resolved && fs.existsSync(resolved)) return resolved;
+  } catch {
+    // ignore
+  }
+
+  return null;
+}
 
 // ES module __dirname equivalent
 const __filename = fileURLToPath(import.meta.url);
@@ -295,18 +317,22 @@ export async function crawlWebsiteWithPlaywright({
     ].filter(Boolean);
 
     for (const candidate of candidates) {
-      console.warn(`[CRAWL] Fallback: retrying launch with system chromium (executablePath="${candidate}")`);
+      const resolvedPath = resolveExecutablePath(candidate);
+      console.warn(
+        `[CRAWL] Fallback: candidate="${candidate}" resolved="${resolvedPath || 'null'}"`
+      );
+      if (!resolvedPath) continue;
       try {
         browser = await chromium.launch({
           headless: true,
-          executablePath: candidate,
+          executablePath: resolvedPath,
           args: ['--no-sandbox', '--disable-setuid-sandbox'],
         });
-        console.log(`[CRAWL] ✅ Launched using system chromium: ${candidate}`);
+        console.log(`[CRAWL] ✅ Launched using system chromium: ${resolvedPath}`);
         break;
       } catch (err2) {
         const msg2 = err2?.message || String(err2);
-        console.error(`[CRAWL] Fallback launch failed for "${candidate}":`, msg2);
+        console.error(`[CRAWL] Fallback launch failed for "${resolvedPath}":`, msg2);
       }
     }
 
