@@ -4,7 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fetch from 'node-fetch';
 import { XMLParser } from 'fast-xml-parser';
-import { execFileSync } from 'node:child_process';
+// Note: avoid relying on external tools like `which` - some minimal containers don't ship it.
 
 const DEBUG_CRAWL = process.env.DEBUG_CRAWL === 'true';
 const logCrawl = (...args) => {
@@ -23,12 +23,12 @@ function resolveExecutablePath(cmdOrPath) {
     return fs.existsSync(value) ? value : null;
   }
 
-  // Resolve from PATH (Linux containers)
-  try {
-    const resolved = execFileSync('which', [value], { encoding: 'utf8' }).trim();
-    if (resolved && fs.existsSync(resolved)) return resolved;
-  } catch {
-    // ignore
+  // Resolve from PATH (portable, no `which` dependency)
+  const pathEnv = process.env.PATH || '';
+  const parts = pathEnv.split(':').filter(Boolean);
+  for (const dir of parts) {
+    const p = path.join(dir, value);
+    if (fs.existsSync(p)) return p;
   }
 
   return null;
