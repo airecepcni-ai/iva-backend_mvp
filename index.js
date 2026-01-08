@@ -57,8 +57,20 @@ if (!playwrightExecutableExists) {
   console.log("[iva-backend] ✅ Playwright Chromium executable found and ready.");
 }
 
-app.use(express.json({ limit: MAX_BODY_SIZE_BYTES }));
-app.use(express.urlencoded({ extended: true, limit: MAX_BODY_SIZE_BYTES }));
+// Body parsing:
+// - Most routes want JSON/urlencoded parsing.
+// - Vapi debug endpoints must NEVER be rejected by global parsers (we parse raw text there).
+const jsonParser = express.json({ limit: MAX_BODY_SIZE_BYTES });
+const urlParser = express.urlencoded({ extended: true, limit: MAX_BODY_SIZE_BYTES });
+app.use((req, res, next) => {
+  // Use req.path (no query string) for exact matches.
+  if (req.path === '/vapi/_debug' || req.path === '/api/vapi/_debug') return next();
+
+  return jsonParser(req, res, (err) => {
+    if (err) return next(err);
+    return urlParser(req, res, next);
+  });
+});
 
 const defaultTrustedOrigins = ['https://ivaai.cz', 'https://www.ivaai.cz'];
 const fromEnvOrigins = process.env.CORS_ORIGINS

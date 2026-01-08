@@ -7,6 +7,9 @@ import { cancelCalendarEvent, rescheduleCalendarEvent, isSlotAvailable } from '.
 import { DateTime } from 'luxon';
 import { resolveBusinessByCalledNumber, extractCalledNumberDetailed, normalizeE164Like } from '../lib/tenantResolver.js';
 
+// Keep in sync with index.js MAX_BODY_SIZE_BYTES (debug endpoint needs same limit).
+const MAX_BODY_SIZE_BYTES = 4.5 * 1024 * 1024;
+
 /**
  * Resolve Czech relative dates like "zítra", "pozítří", "dnes" to ISO YYYY-MM-DD.
  * Also handles ISO dates, Czech DD.MM.YYYY, DD.MM., Czech month names, and numeric dates with spaces.
@@ -306,13 +309,119 @@ function resolveCzechDate(rawDate, now = new Date()) {
 
 const router = express.Router();
 
+function isProdEnv() {
+  return process.env.NODE_ENV === 'production';
+}
+
+function getProvidedDebugToken(req) {
+  const headerToken = req.get('x-debug-token');
+  if (headerToken && headerToken.trim()) return headerToken.trim();
+
+  const auth = req.get('authorization') || '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  return m?.[1]?.trim() || null;
+}
+
+function requireDebugAuth(req, res) {
+  if (!isProdEnv()) return true;
+
+  const expected = process.env.VAPI_DEBUG_TOKEN || '';
+  const provided = getProvidedDebugToken(req) || '';
+  if (!expected || !provided || provided !== expected) {
+    res.status(401).json({ ok: false, error: 'unauthorized' });
+    return false;
+  }
+  return true;
+}
+
+function pickDebugHeaders(req) {
+  const names = [
+    'host',
+    'origin',
+    'referer',
+    'content-type',
+    'user-agent',
+    'x-forwarded-for',
+    'x-tenant-id',
+    'x-vapi-signature',
+  ];
+  const out = {};
+  for (const name of names) {
+    const v = req.get(name);
+    if (v !== undefined && v !== null && String(v).length > 0) out[name] = v;
+  }
+  return out;
+}
+
 // In-memory tenant cache (per running process). Keyed by call/session id.
 // This avoids repeated called-number DB lookups across webhook + tool calls.
 const __tenantBySessionId = new Map();
 
-function isProdEnv() {
-  return process.env.NODE_ENV === 'production';
-}
+/**
+ * Debug endpoint to inspect what Vapi sends + how we resolve tenant/business.
+ *
+ * Mounted at BOTH:
+ * - POST /vapi/_debug
+ * - POST /api/vapi/_debug
+ *
+ * In production, requires VAPI_DEBUG_TOKEN via:
+ * - header: x-debug-token: <token>
+ * - or Authorization: Bearer <token>
+ */
+router.post(
+  '/_debug',
+  // Parse raw body as text so this endpoint is never blocked by JSON parsing errors.
+  // index.js skips global json/urlencoded parsers for /vapi/_debug and /api/vapi/_debug.
+  express.text({ type: '*/*', limit: MAX_BODY_SIZE_BYTES }),
+  async (req, res) => {
+  if (!requireDebugAuth(req, res)) return;
+
+  const receivedAt = new Date().toISOString();
+  const route = `${req.baseUrl || ''}${req.path || ''}` || req.originalUrl || '';
+
+  const rawBody = typeof req.body === 'string' ? req.body : (req.body == null ? '' : String(req.body));
+  const trimmed = rawBody.trim();
+  let parsedJson = null;
+  if (trimmed) {
+    try {
+      parsedJson = JSON.parse(trimmed);
+    } catch {
+      parsedJson = null;
+    }
+  }
+
+  const body = parsedJson ?? null;
+
+  const tenantHeader = req.get('x-tenant-id') || null;
+  const extracted = extractCalledNumberDetailed((parsedJson && typeof parsedJson === 'object') ? parsedJson : {});
+  const normalizedTo = extracted?.to ? normalizeE164Like(extracted.to) : null;
+
+  let resolvedByCalledNumber = null;
+  try {
+    // Best-effort DB-backed resolution (same helper used by webhook). If this throws, we still respond.
+    resolvedByCalledNumber = await resolveBusinessByCalledNumber((parsedJson && typeof parsedJson === 'object') ? parsedJson : {});
+  } catch (e) {
+    resolvedByCalledNumber = { ok: false, error: 'resolve_failed', message: e?.message || String(e) };
+  }
+
+  return res.status(200).json({
+    ok: true,
+    route,
+    receivedAt,
+    headers: pickDebugHeaders(req),
+    rawBody,
+    parsedJson,
+    body,
+    resolved: {
+      tenantIdHeader: tenantHeader,
+      calledNumber: extracted?.to ?? null,
+      calledNumberNormalized: normalizedTo,
+      calledNumberSourcePath: extracted?.sourcePath ?? null,
+      byCalledNumber: resolvedByCalledNumber,
+    },
+  });
+});
+
 
 function getSessionIdFromCall(call) {
   if (!call || typeof call !== 'object') return null;

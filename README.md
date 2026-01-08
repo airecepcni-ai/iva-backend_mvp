@@ -34,6 +34,33 @@ Server poběží na `http://localhost:8787`
 
 ## API Endpointy
 
+## Vapi debug endpoint (temporary)
+
+This endpoint helps debug what Vapi sends and what tenant/business gets resolved.
+
+- Mounted at **both**: `POST /api/vapi/_debug` and `POST /vapi/_debug`
+- **Production safety**: when `NODE_ENV=production`, requires `VAPI_DEBUG_TOKEN` via `x-debug-token` header or `Authorization: Bearer <token>`.
+
+Example (through Vercel proxy):
+
+```bash
+## PowerShell (Windows) - recommended (avoids quote-stripping)
+$token = "<token>"
+$body = '{"hello":"world"}'
+$body | curl.exe --ssl-no-revoke -i "https://ivaai.cz/api/vapi/_debug" `
+  -X POST `
+  -H "Content-Type: application/json" `
+  -H "x-debug-token: $token" `
+  --data-binary "@-"
+
+## Bash (Linux/macOS)
+curl -i "https://ivaai.cz/api/vapi/_debug" \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -H "x-debug-token: <token>" \
+  --data-raw '{"hello":"world"}'
+```
+
 ### `POST /api/ingest`
 Indexace webu nebo PDF souborů.
 
