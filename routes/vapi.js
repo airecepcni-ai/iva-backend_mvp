@@ -317,6 +317,64 @@ function isDebugVapiEnabled() {
   return String(process.env.DEBUG_VAPI || '').toLowerCase() === 'true';
 }
 
+// Log-once cache to avoid spamming when Vapi omits transcripts/messages.
+const __missingUserTextLoggedBySessionKey = new Set();
+
+/**
+ * Extract the most recent user utterance from common Vapi shapes.
+ *
+ * Order:
+ * - body.message.messages (array)
+ * - body.message.conversation (array)
+ * - body.message.transcript (string)
+ * - body.transcript (string)
+ *
+ * For message entries, supports:
+ * - content: string
+ * - content: array of parts like { type:"text", text:"..." } (joins all text)
+ *
+ * Returns trimmed string or null.
+ */
+function getLastUserText(body) {
+  if (!body || typeof body !== 'object') return null;
+
+  const msg = body?.message && typeof body.message === 'object' ? body.message : null;
+
+  const messageLists = [];
+  if (Array.isArray(msg?.messages)) messageLists.push({ list: msg.messages, sourcePath: 'body.message.messages' });
+  if (Array.isArray(msg?.conversation)) messageLists.push({ list: msg.conversation, sourcePath: 'body.message.conversation' });
+
+  const contentToText = (content) => {
+    if (typeof content === 'string' && content.trim()) return content.trim();
+    if (Array.isArray(content)) {
+      const parts = content
+        .map((p) => {
+          if (!p || typeof p !== 'object') return null;
+          if (p.type && p.type !== 'text') return null;
+          return typeof p.text === 'string' ? p.text : null;
+        })
+        .filter((t) => typeof t === 'string' && t.trim().length > 0);
+      if (parts.length > 0) return parts.join(' ').trim();
+    }
+    return null;
+  };
+
+  // Scan from end to find last role==="user"
+  for (const { list } of messageLists) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (!m || typeof m !== 'object') continue;
+      if (m.role !== 'user') continue;
+      const text = contentToText(m.content);
+      if (text) return text;
+    }
+  }
+
+  if (typeof msg?.transcript === 'string' && msg.transcript.trim()) return msg.transcript.trim();
+  if (typeof body?.transcript === 'string' && body.transcript.trim()) return body.transcript.trim();
+  return null;
+}
+
 /**
  * Returns the most likely "messages" array from a Vapi payload + which path matched.
  *
@@ -928,12 +986,10 @@ async function handleConversationUpdate(message, res, rawPayload) {
     ? rawPayload
     : { message };
 
-  const { sourcePath: messagesSourcePath } = getVapiMessages(bodyForText);
-  const userText = extractLatestUserText(bodyForText);
+  const userText = getLastUserText(bodyForText);
 
   if (isDebugVapiEnabled()) {
     console.log('[VAPI][debug] conversation-update extraction', {
-      messagesSourcePath,
       foundText: !!userText,
       preview: userText ? userText.slice(0, 80) : '',
     });
@@ -949,10 +1005,16 @@ async function handleConversationUpdate(message, res, rawPayload) {
 
   // Only log warning if we truly have no user text after all checks
   if (!userText) {
-    console.warn('[VAPI] No user text found in conversation-update', {
-      hasTopLevelTranscript: !!message.transcript,
-      hasArtifactTranscript: !!artifact.transcript,
-    });
+    // Log once per session/type when transcript is missing to help diagnose payload shapes.
+    const stableSessionId = getSessionIdFromCall(call);
+    const sessionKey = `${stableSessionId || 'no_session'}:${message?.type || 'unknown_type'}`;
+    if (!__missingUserTextLoggedBySessionKey.has(sessionKey)) {
+      __missingUserTextLoggedBySessionKey.add(sessionKey);
+      console.warn('[VAPI] Missing user transcript/text in conversation-update', {
+        type: message?.type ?? null,
+        messageKeys: Object.keys((bodyForText && typeof bodyForText === 'object' && bodyForText.message && typeof bodyForText.message === 'object') ? bodyForText.message : {}),
+      });
+    }
     
     return res.status(200).json({
       response: {
@@ -1048,12 +1110,55 @@ router.post('/book_appointment', async (req, res) => {
       });
     }
 
+    // --- Input validation (before expensive settings/calendar/booking calls) ---
+    // Service
+    if (!body.serviceName && !body.serviceId) {
+      return res.status(200).json({
+        success: false,
+        error: 'MISSING_SERVICE',
+        message_cs: 'Jakou službu si přejete rezervovat?',
+      });
+    }
+
+    // Customer phone: prefer explicit, fallback to Vapi call customer number if present
+    const rawCustomerPhone =
+      body.customerPhone ??
+      body?.message?.call?.customer?.number ??
+      body?.call?.customer?.number ??
+      null;
+
+    if (!rawCustomerPhone || String(rawCustomerPhone).trim().length < 5) {
+      return res.status(200).json({
+        success: false,
+        error: 'MISSING_CUSTOMER_PHONE',
+        message_cs: 'Prosím, nadiktujte mi vaše telefonní číslo pro rezervaci.',
+      });
+    }
+
+    const customerPhoneNormalized = normalizeE164Like(String(rawCustomerPhone));
+    if (!customerPhoneNormalized || !/^\+\d{8,15}$/.test(customerPhoneNormalized)) {
+      return res.status(200).json({
+        success: false,
+        error: 'INVALID_CUSTOMER_PHONE',
+        message_cs: 'Prosím, řekněte mi telefonní číslo ve formátu +420…',
+      });
+    }
+
+    // Customer name is still required for a booking
+    if (!body.customerName || String(body.customerName).trim().length === 0) {
+      return res.status(200).json({
+        success: false,
+        error: 'MISSING_CUSTOMER_NAME',
+        message_cs: 'Prosím, řekněte mi vaše jméno pro rezervaci.',
+      });
+    }
+
     // Log incoming request
     console.log('[VAPI_TOOL] book_appointment start', { businessId });
     console.log('[VAPI_TOOL] book_appointment request', {
       businessId,
       customerName: body.customerName,
-      customerPhone: body.customerPhone,
+      customerPhone: customerPhoneNormalized,
       serviceId: body.serviceId,
       serviceName: body.serviceName,
       locationName: body.locationName,
@@ -1062,15 +1167,6 @@ router.post('/book_appointment', async (req, res) => {
       dateText: body.dateText,
       time: body.time,
     });
-
-    // Load IVA settings (needed for Google Calendar integration)
-    const settingsStart = Date.now();
-    const { settings, error: settingsError } = await getIvaSettingsForTenant(businessId);
-    console.log('[VAPI_TOOL] timing getIvaSettingsForTenant ms=', Date.now() - settingsStart);
-    if (settingsError) {
-      console.error('[VAPI_TOOL] Failed to load settings:', settingsError);
-      // Continue anyway - booking can still be saved to DB
-    }
 
     // Convert Vapi format to bookingPayload format
     // Vapi might send startIso (ISO datetime) or separate date/time
@@ -1126,8 +1222,8 @@ router.post('/book_appointment', async (req, res) => {
         console.log('[VAPI_TOOL] book_appointment total_ms=', Date.now() - t0);
         return res.status(200).json({
           success: false,
-          error: 'INVALID_DATE',
-          message_cs: 'Systém nerozumí zadanému datu. Zkuste ho prosím říct třeba jako „8. 12. 2025" nebo „příští pondělí".',
+          error: 'MISSING_DATETIME',
+          message_cs: 'Omlouvám se, potřebuji znát datum a čas rezervace. Můžete to prosím zopakovat?',
         });
       }
 
@@ -1179,34 +1275,25 @@ router.post('/book_appointment', async (req, res) => {
       console.log('[VAPI_TOOL] book_appointment total_ms=', Date.now() - t0);
       return res.status(200).json({
         success: false,
-        error: 'Missing date or time',
-        message_cs: 'Omlouvám se, potřebuji znát datum a čas rezervace. Můžete prosím zopakovat?',
+        error: 'MISSING_DATETIME',
+        message_cs: 'Omlouvám se, potřebuji znát datum a čas rezervace. Můžete to prosím zopakovat?',
       });
     }
 
-    if (!body.customerName || !body.customerPhone) {
-      console.log('[VAPI_TOOL] book_appointment total_ms=', Date.now() - t0);
-      return res.status(200).json({
-        success: false,
-        error: 'Missing customer name or phone',
-        message_cs: 'Omlouvám se, potřebuji znát vaše jméno a telefonní číslo pro rezervaci.',
-      });
-    }
-
-    if (!body.serviceName && !body.serviceId) {
-      console.log('[VAPI_TOOL] book_appointment total_ms=', Date.now() - t0);
-      return res.status(200).json({
-        success: false,
-        error: 'Missing service',
-        message_cs: 'Omlouvám se, potřebuji znát, na jakou službu chcete rezervaci.',
-      });
+    // Load IVA settings (needed for Google Calendar integration)
+    const settingsStart = Date.now();
+    const { settings, error: settingsError } = await getIvaSettingsForTenant(businessId);
+    console.log('[VAPI_TOOL] timing getIvaSettingsForTenant ms=', Date.now() - settingsStart);
+    if (settingsError) {
+      console.error('[VAPI_TOOL] Failed to load settings:', settingsError);
+      // Continue anyway - booking can still be saved to DB
     }
 
     // Build bookingPayload in the format expected by createBooking
     const bookingPayload = {
       service: body.serviceId || body.serviceName || '',
       client_name: body.customerName,
-      client_phone: body.customerPhone,
+      client_phone: customerPhoneNormalized,
       client_email: body.customerEmail || null,
       location: body.locationName || '',
       date: bookingDate,
@@ -1280,6 +1367,7 @@ router.post('/book_appointment', async (req, res) => {
       message_cs: confirmationMessageCs,
     });
   } catch (err) {
+    console.error('[VAPI_TOOL] book_appointment failed', { err, body: req.body || {} });
     console.error('[VAPI_TOOL] book_appointment error', {
       err,
       total_ms: Date.now() - t0,
