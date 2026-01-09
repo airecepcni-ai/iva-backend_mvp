@@ -1,0 +1,17 @@
+﻿{
+  "message": {
+    "type": "conversation-update",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "Dobrý den, chci se objednat na střih zítra odpoledne." }
+        ]
+      }
+    ],
+    "call": {
+      "phoneNumber": { "number": "+420910928116" },
+      "customer": { "number": "+420777228540" }
+    }
+  }
+}

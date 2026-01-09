@@ -151,13 +151,14 @@ app.get('/api/debug/extract-to', (req, res) => {
   }
 
   const extracted = extractCalledNumberDetailed(payload);
-  const normalized = extracted?.to ? normalizeE164Like(extracted.to) : null;
+  const calledNumberCandidate = extracted?.calledNumber ?? null;
+  const normalized = calledNumberCandidate ? normalizeE164Like(calledNumberCandidate) : null;
 
   return res.status(200).json({
     ok: true,
-    to: extracted?.to ?? null,
-    sourcePath: extracted?.sourcePath ?? null,
-    normalizedTo: normalized,
+    calledNumberCandidate,
+    calledNumberSourcePath: extracted?.sourcePath ?? null,
+    calledNumberNormalized: normalized,
   });
 });
 

@@ -61,6 +61,51 @@ curl -i "https://ivaai.cz/api/vapi/_debug" \
   --data-raw '{"hello":"world"}'
 ```
 
+### Regression sample: inbound vs caller number (tenant resolution)
+
+When Vapi provides both the business inbound number and the caller/customer number, tenant resolution **must prefer the inbound business number** (the number that was called).
+
+Minimal sample payload:
+
+```json
+{
+  "message": {
+    "type": "conversation-update",
+    "call": {
+      "phoneNumber": { "number": "+420910928116" },
+      "customer": { "number": "+420777228540" }
+    }
+  }
+}
+```
+
+Expected tenant resolution: use **`+420910928116`** (from `message.call.phoneNumber.number`), not the caller `+420777228540`.
+
+### Manual test: Vapi conversation-update user speech in `message.messages`
+
+Some Vapi payloads include user speech under `message.messages[].content[].text`. This **must** be treated as the user utterance (and must not incorrectly fall back to “Promiňte, neslyšel jsem vás...”).
+
+Sample payload:
+
+```json
+{
+  "message": {
+    "type": "conversation-update",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          { "type": "text", "text": "Dobrý den..." }
+        ]
+      }
+    ],
+    "call": { "phoneNumber": { "number": "+420910928116" } }
+  }
+}
+```
+
+Expected behavior: the webhook response should be something other than **“Promiňte, neslyšel jsem vás...”** (i.e., IVA should react to `Dobrý den...`).
+
 ### `POST /api/ingest`
 Indexace webu nebo PDF souborů.
 

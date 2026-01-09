@@ -313,6 +313,68 @@ function isProdEnv() {
   return process.env.NODE_ENV === 'production';
 }
 
+function isDebugVapiEnabled() {
+  return String(process.env.DEBUG_VAPI || '').toLowerCase() === 'true';
+}
+
+/**
+ * Extract the latest user utterance from a Vapi payload.
+ *
+ * Order:
+ * 1) body.message.messages (array)
+ * 2) body.message.conversation (array OR object with .messages)
+ *
+ * Each message item may have:
+ * - content: string
+ * - OR content: array of parts like { type: "text", text: "..." }
+ *
+ * Returns trimmed string or null.
+ */
+function extractUserText(body) {
+  if (!body || typeof body !== 'object') return null;
+
+  const message = body.message && typeof body.message === 'object' ? body.message : null;
+
+  const candidateLists = [];
+
+  // 1) message.messages (array)
+  if (Array.isArray(message?.messages)) {
+    candidateLists.push(message.messages);
+  }
+
+  // 2) message.conversation (array OR { messages: [] })
+  if (Array.isArray(message?.conversation)) {
+    candidateLists.push(message.conversation);
+  } else if (message?.conversation && typeof message.conversation === 'object' && Array.isArray(message.conversation.messages)) {
+    candidateLists.push(message.conversation.messages);
+  }
+
+  // Helper to normalize content into a single string
+  const contentToText = (content) => {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      const parts = content
+        .map((p) => (p && typeof p === 'object' ? p.text : null))
+        .filter((t) => typeof t === 'string' && t.trim().length > 0);
+      if (parts.length > 0) return parts.join(' ');
+    }
+    return null;
+  };
+
+  // Walk candidate lists in order; within each, find last role==="user"
+  for (const list of candidateLists) {
+    for (let i = list.length - 1; i >= 0; i--) {
+      const m = list[i];
+      if (!m || typeof m !== 'object') continue;
+      if (m.role !== 'user') continue;
+      const text = contentToText(m.content);
+      if (typeof text === 'string' && text.trim().length > 0) return text.trim();
+    }
+  }
+
+  return null;
+}
+
 function getProvidedDebugToken(req) {
   const headerToken = req.get('x-debug-token');
   if (headerToken && headerToken.trim()) return headerToken.trim();
@@ -394,7 +456,13 @@ router.post(
 
   const tenantHeader = req.get('x-tenant-id') || null;
   const extracted = extractCalledNumberDetailed((parsedJson && typeof parsedJson === 'object') ? parsedJson : {});
-  const normalizedTo = extracted?.to ? normalizeE164Like(extracted.to) : null;
+  const calledNumberCandidate = extracted?.calledNumber ?? null;
+  const calledNumberNormalized = calledNumberCandidate ? normalizeE164Like(calledNumberCandidate) : null;
+  const call = (body && typeof body === 'object')
+    ? (body?.message?.call ?? body?.call ?? null)
+    : null;
+  const inboundNumber = body?.message?.call?.phoneNumber?.number ?? null;
+  const callerNumber = body?.message?.call?.customer?.number ?? null;
 
   let resolvedByCalledNumber = null;
   try {
@@ -414,9 +482,17 @@ router.post(
     body,
     resolved: {
       tenantIdHeader: tenantHeader,
-      calledNumber: extracted?.to ?? null,
-      calledNumberNormalized: normalizedTo,
+      // Backwards-compatible: older debug clients expect "calledNumber"
+      calledNumber: calledNumberCandidate,
+      calledNumberCandidate,
+      calledNumberNormalized,
       calledNumberSourcePath: extracted?.sourcePath ?? null,
+      inboundNumber,
+      callerNumber,
+      call: {
+        phoneNumberNumber: call?.phoneNumber?.number ?? null,
+        customerNumber: call?.customer?.number ?? null,
+      },
       byCalledNumber: resolvedByCalledNumber,
     },
   });
@@ -561,7 +637,8 @@ router.post('/webhook', async (req, res) => {
       };
 
       const extracted = extractCalledNumberDetailed(body);
-      const normalizedTo = extracted?.to ? normalizeE164Like(extracted.to) : null;
+      const calledNumberCandidate = extracted?.calledNumber ?? null;
+      const calledNumberNormalized = calledNumberCandidate ? normalizeE164Like(calledNumberCandidate) : null;
 
       console.log('[vapi][dev] webhook body keys:', topKeys);
       console.log('[vapi][dev] to candidates:', {
@@ -570,12 +647,13 @@ router.post('/webhook', async (req, res) => {
         'message.call.to': redact(call?.to),
         'message.call.toNumber': redact(call?.toNumber ?? call?.to_number),
         'message.call.destination': redact(call?.destination ?? call?.destinationNumber ?? call?.destination_number),
-        'message.call.phoneNumber': redact(call?.phoneNumber ?? call?.phone_number),
+        'message.call.phoneNumber.number': redact(call?.phoneNumber?.number),
+        'message.call.customer.number': redact(call?.customer?.number),
         'message.customer.number': redact(customer?.number ?? customer?.phoneNumber ?? customer?.phone_number),
         extracted: {
-          to: redact(extracted?.to),
+          calledNumber: redact(calledNumberCandidate),
           sourcePath: extracted?.sourcePath,
-          normalized: redact(normalizedTo),
+          normalized: redact(calledNumberNormalized),
         },
       });
     }
@@ -645,7 +723,12 @@ async function handleAssistantRequest(message, res, rawPayload) {
       }
       // If number is unmapped in prod, we still return assistantId; routing will be blocked later.
       if (isProdEnv() && resolved && !resolved.ok) {
-        console.warn('[VAPI] assistant-request: no phone mapping (prod)', { to: resolved.to });
+        if (resolved.error === 'unknown_number' && resolved.calledNumber) {
+          console.warn('[VAPI] assistant-request: unknown called number (prod)', {
+            calledNumber: resolved.calledNumber,
+            sourcePath: resolved.sourcePath ?? null,
+          });
+        }
       }
     }
   } catch (e) {
@@ -684,7 +767,17 @@ async function handleConversationUpdate(message, res, rawPayload) {
 
   // Production safety: require called-number mapping (or explicit metadata) – no silent fallback.
   if (isProd && !tenantId) {
-    console.warn('[VAPI] Unknown called number (prod - no tenant):', resolved?.to ?? null);
+    if (resolved?.error === 'unknown_number' && resolved?.calledNumber) {
+      console.warn('[VAPI] Unknown called number (prod - no tenant):', {
+        calledNumber: resolved.calledNumber,
+        sourcePath: resolved.sourcePath ?? null,
+      });
+    } else if (resolved?.error === 'missing_called_number') {
+      // Missing call metadata is not an error condition by itself; avoid noisy "unknown number" logs.
+      console.log('[VAPI] No called number found (prod - no tenant)', {
+        sourcePath: resolved?.sourcePath ?? null,
+      });
+    }
     return res.status(200).json({
       response: {
         type: 'assistant-response',
@@ -726,7 +819,7 @@ async function handleConversationUpdate(message, res, rawPayload) {
   // If we did a called-number lookup and it explicitly says not subscribed, block early.
   if (resolved && !resolved.ok && resolved.error === 'not_subscribed') {
     console.warn('[VAPI] Business not subscribed for called number:', {
-      to: resolved.to,
+      calledNumber: resolved.calledNumber,
       businessId: resolved.businessId,
     });
     return res.status(200).json({
@@ -766,76 +859,24 @@ async function handleConversationUpdate(message, res, rawPayload) {
     }
   }
 
-  // 2) Extract user text using robust logic
-  // Try multiple sources: conversation.messages, artifact.messages, transcript
-  const conversation = message.conversation ?? message.data?.conversation ?? null;
-  const conversationMessages = Array.isArray(conversation?.messages) ? conversation.messages : [];
-  const artifactMessages = Array.isArray(artifact?.messages) ? artifact.messages : [];
-  
-  // Combine both sources, prefer conversation messages
-  const allMessages = [...conversationMessages, ...artifactMessages];
-  
-  // Get the last message (most recent)
-  const lastMessage = allMessages.length > 0 ? allMessages[allMessages.length - 1] : null;
+  // 2) Extract user text from Vapi payload in a robust way.
+  const bodyForText = (rawPayload && typeof rawPayload === 'object')
+    ? rawPayload
+    : { message };
 
-  let userText = null;
+  const userText = extractUserText(bodyForText);
 
-  // Primary check: lastMessage.message field (this is what Vapi actually sends)
-  if (
-    lastMessage &&
-    (lastMessage.role === 'user' || lastMessage.role === 'customer') &&
-    typeof lastMessage.message === 'string' &&
-    lastMessage.message.trim().length > 0
-  ) {
-    userText = lastMessage.message.trim();
-  }
-  // Secondary check: lastMessage.content array
-  else if (lastMessage && lastMessage.content && Array.isArray(lastMessage.content)) {
-    const textContent = lastMessage.content.find((c) => c.type === 'text' || c.type === 'transcript');
-    if (textContent && (textContent.text || textContent.transcript)) {
-      userText = (textContent.text || textContent.transcript).trim();
-    }
-  }
-  // Tertiary check: lastMessage.content as string
-  else if (lastMessage && typeof lastMessage.content === 'string' && lastMessage.content.trim().length > 0) {
-    userText = lastMessage.content.trim();
-  }
-  // Fourth check: lastMessage.text
-  else if (lastMessage && typeof lastMessage.text === 'string' && lastMessage.text.trim().length > 0) {
-    userText = lastMessage.text.trim();
-  }
-  // Fifth check: lastMessage.transcript
-  else if (lastMessage && typeof lastMessage.transcript === 'string' && lastMessage.transcript.trim().length > 0) {
-    userText = lastMessage.transcript.trim();
-  }
-  // Fallback: message.transcript (top-level)
-  else if (typeof message.transcript === 'string' && message.transcript.trim().length > 0) {
-    userText = message.transcript.trim();
-  }
-  // Fallback: artifact.transcript
-  else if (typeof artifact.transcript === 'string' && artifact.transcript.trim().length > 0) {
-    // Extract last sentence or paragraph from transcript
-    const transcriptLines = artifact.transcript.split('\n').filter((l) => l.trim());
-    if (transcriptLines.length > 0) {
-      userText = transcriptLines[transcriptLines.length - 1].trim();
-    }
-  }
-  // Fallback: nested transcript.text
-  else if (
-    message.transcript?.text &&
-    typeof message.transcript.text === 'string' &&
-    message.transcript.text.trim().length > 0
-  ) {
-    userText = message.transcript.text.trim();
+  if (isDebugVapiEnabled()) {
+    console.log('[VAPI][debug] extractUserText', {
+      type: message?.type ?? null,
+      foundText: !!userText,
+      first80: userText ? userText.slice(0, 80) : '',
+    });
   }
 
   // Only log warning if we truly have no user text after all checks
   if (!userText) {
     console.warn('[VAPI] No user text found in conversation-update', {
-      messagesCount: allMessages.length,
-      conversationMessagesCount: conversationMessages.length,
-      artifactMessagesCount: artifactMessages.length,
-      lastMessage: lastMessage,
       hasTopLevelTranscript: !!message.transcript,
       hasArtifactTranscript: !!artifact.transcript,
     });

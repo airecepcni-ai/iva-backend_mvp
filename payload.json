@@ -1,0 +1,9 @@
+﻿{
+  "message":{
+    "type":"conversation-update",
+    "call":{
+      "phoneNumber":{"number":"+420910928116"},
+      "customer":{"number":"+420777228540"}
+    }
+  }
+}
