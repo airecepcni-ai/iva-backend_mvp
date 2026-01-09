@@ -318,59 +318,123 @@ function isDebugVapiEnabled() {
 }
 
 /**
- * Extract the latest user utterance from a Vapi payload.
+ * Returns the most likely "messages" array from a Vapi payload + which path matched.
  *
- * Order:
- * 1) body.message.messages (array)
- * 2) body.message.conversation (array OR object with .messages)
+ * Priority:
+ * - body.message.messages
+ * - body.message.conversation
+ * - body.messages
+ * - body.conversation
  *
- * Each message item may have:
- * - content: string
- * - OR content: array of parts like { type: "text", text: "..." }
+ * Fallback: []
+ */
+function getVapiMessages(body) {
+  if (!body || typeof body !== 'object') return { messages: [], sourcePath: null };
+
+  if (Array.isArray(body?.message?.messages)) {
+    return { messages: body.message.messages, sourcePath: 'body.message.messages' };
+  }
+
+  // Vapi can place full transcripts under message.artifact.*
+  if (Array.isArray(body?.message?.artifact?.messages)) {
+    return { messages: body.message.artifact.messages, sourcePath: 'body.message.artifact.messages' };
+  }
+
+  if (Array.isArray(body?.message?.artifact?.conversation?.messages)) {
+    return {
+      messages: body.message.artifact.conversation.messages,
+      sourcePath: 'body.message.artifact.conversation.messages',
+    };
+  }
+
+  if (Array.isArray(body?.message?.artifact?.conversation)) {
+    return { messages: body.message.artifact.conversation, sourcePath: 'body.message.artifact.conversation' };
+  }
+
+  // Some payloads have conversation as an array or as { messages: [] }
+  if (Array.isArray(body?.message?.conversation)) {
+    return { messages: body.message.conversation, sourcePath: 'body.message.conversation' };
+  }
+  if (Array.isArray(body?.message?.conversation?.messages)) {
+    return { messages: body.message.conversation.messages, sourcePath: 'body.message.conversation.messages' };
+  }
+
+  if (Array.isArray(body?.messages)) {
+    return { messages: body.messages, sourcePath: 'body.messages' };
+  }
+
+  if (Array.isArray(body?.conversation)) {
+    return { messages: body.conversation, sourcePath: 'body.conversation' };
+  }
+  if (Array.isArray(body?.conversation?.messages)) {
+    return { messages: body.conversation.messages, sourcePath: 'body.conversation.messages' };
+  }
+
+  return { messages: [], sourcePath: null };
+}
+
+/**
+ * Convert a message object to text.
+ *
+ * Supports:
+ * - m.content: string
+ * - m.content: array of parts (join .text for parts where type==="text"; also tolerate {text:"..."})
+ * - m.text: string
  *
  * Returns trimmed string or null.
  */
-function extractUserText(body) {
-  if (!body || typeof body !== 'object') return null;
+function messageToText(m) {
+  if (!m || typeof m !== 'object') return null;
 
-  const message = body.message && typeof body.message === 'object' ? body.message : null;
-
-  const candidateLists = [];
-
-  // 1) message.messages (array)
-  if (Array.isArray(message?.messages)) {
-    candidateLists.push(message.messages);
+  if (typeof m.content === 'string' && m.content.trim().length > 0) {
+    return m.content.trim();
   }
 
-  // 2) message.conversation (array OR { messages: [] })
-  if (Array.isArray(message?.conversation)) {
-    candidateLists.push(message.conversation);
-  } else if (message?.conversation && typeof message.conversation === 'object' && Array.isArray(message.conversation.messages)) {
-    candidateLists.push(message.conversation.messages);
+  if (Array.isArray(m.content)) {
+    const parts = m.content
+      .map((p) => {
+        if (!p || typeof p !== 'object') return null;
+        if (p.type && p.type !== 'text') return null;
+        if (typeof p.text === 'string') return p.text;
+        return null;
+      })
+      .filter((t) => typeof t === 'string' && t.trim().length > 0);
+    if (parts.length > 0) return parts.join(' ').trim();
   }
 
-  // Helper to normalize content into a single string
-  const contentToText = (content) => {
-    if (typeof content === 'string') return content;
-    if (Array.isArray(content)) {
-      const parts = content
-        .map((p) => (p && typeof p === 'object' ? p.text : null))
-        .filter((t) => typeof t === 'string' && t.trim().length > 0);
-      if (parts.length > 0) return parts.join(' ');
-    }
-    return null;
+  if (typeof m.text === 'string' && m.text.trim().length > 0) {
+    return m.text.trim();
+  }
+
+  return null;
+}
+
+/**
+ * Scan messages from end and return the last role==="user" text.
+ */
+function extractLatestUserText(body) {
+  const { messages } = getVapiMessages(body);
+  const list = Array.isArray(messages) ? messages : [];
+
+  const isUserLikeRole = (role) => {
+    if (typeof role !== 'string') return false;
+    const r = role.toLowerCase();
+    return r === 'user' || r === 'customer' || r === 'caller' || r === 'human';
   };
 
-  // Walk candidate lists in order; within each, find last role==="user"
-  for (const list of candidateLists) {
-    for (let i = list.length - 1; i >= 0; i--) {
-      const m = list[i];
-      if (!m || typeof m !== 'object') continue;
-      if (m.role !== 'user') continue;
-      const text = contentToText(m.content);
-      if (typeof text === 'string' && text.trim().length > 0) return text.trim();
-    }
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (!m || typeof m !== 'object') continue;
+    if (!isUserLikeRole(m.role)) continue;
+    const text = messageToText(m);
+    if (text) return text;
   }
+
+  const t1 = body?.message?.transcript;
+  if (typeof t1 === 'string' && t1.trim().length > 0) return t1.trim();
+
+  const t2 = body?.message?.artifact?.transcript;
+  if (typeof t2 === 'string' && t2.trim().length > 0) return t2.trim();
 
   return null;
 }
@@ -864,13 +928,22 @@ async function handleConversationUpdate(message, res, rawPayload) {
     ? rawPayload
     : { message };
 
-  const userText = extractUserText(bodyForText);
+  const { sourcePath: messagesSourcePath } = getVapiMessages(bodyForText);
+  const userText = extractLatestUserText(bodyForText);
 
   if (isDebugVapiEnabled()) {
-    console.log('[VAPI][debug] extractUserText', {
-      type: message?.type ?? null,
+    console.log('[VAPI][debug] conversation-update extraction', {
+      messagesSourcePath,
       foundText: !!userText,
-      first80: userText ? userText.slice(0, 80) : '',
+      preview: userText ? userText.slice(0, 80) : '',
+    });
+  }
+
+  if (String(process.env.DEBUG_VAPI_PAYLOADS || '').toLowerCase() === 'true') {
+    console.log('[VAPI][debug] payload summary', {
+      type: message?.type ?? null,
+      messagesSourcePath,
+      extractedUserTextPreview: userText ? userText.slice(0, 80) : '',
     });
   }
 
@@ -955,7 +1028,7 @@ router.post('/book_appointment', async (req, res) => {
     const body = req.body || {};
 
     const isProd = isProdEnv();
-    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: !isProd });
+    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
     const businessId = tenantResult.tenantId || null;
 
     if (!businessId) {
@@ -1234,7 +1307,7 @@ router.post('/find_appointments', async (req, res) => {
     console.log('[VAPI_TOOL] find_appointments request', body);
 
     const isProd = isProdEnv();
-    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: !isProd });
+    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
     const businessId = tenantResult.tenantId || null;
 
     if (!businessId) {
@@ -1405,7 +1478,7 @@ router.post('/update_appointment', async (req, res) => {
 
     const isProd = isProdEnv();
     const body = req.body || {};
-    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: !isProd });
+    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
     const businessId = tenantResult.tenantId || null;
 
     if (!businessId) {

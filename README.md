@@ -106,6 +106,16 @@ Sample payload:
 
 Expected behavior: the webhook response should be something other than **“Promiňte, neslyšel jsem vás...”** (i.e., IVA should react to `Dobrý den...`).
 
+Curl example using `iva-backend/vapi.json`:
+
+```bash
+## PowerShell (Windows)
+Get-Content .\\vapi.json | curl.exe --ssl-no-revoke -i "http://localhost:8787/vapi/webhook" `
+  -X POST `
+  -H "Content-Type: application/json" `
+  --data-binary "@-"
+```
+
 ### `POST /api/ingest`
 Indexace webu nebo PDF souborů.
 
