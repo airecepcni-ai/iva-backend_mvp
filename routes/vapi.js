@@ -317,6 +317,27 @@ function isDebugVapiEnabled() {
   return String(process.env.DEBUG_VAPI || '').toLowerCase() === 'true';
 }
 
+function isDebugVapiToolEnabled() {
+  return String(process.env.DEBUG_VAPI_TOOL || '').toLowerCase() === 'true';
+}
+
+function pickVapiToolDebugHeaders(req) {
+  const names = [
+    'host',
+    'content-type',
+    'x-forwarded-for',
+    'x-vapi-signature',
+    'x-vapi-timestamp',
+    'x-vapi-id',
+  ];
+  const out = {};
+  for (const name of names) {
+    const v = req.get(name);
+    if (v !== undefined && v !== null && String(v).length > 0) out[name] = v;
+  }
+  return out;
+}
+
 // Log-once cache to avoid spamming when Vapi omits transcripts/messages.
 const __missingUserTextLoggedBySessionKey = new Set();
 
@@ -1090,7 +1111,19 @@ router.post('/book_appointment', async (req, res) => {
     const body = req.body || {};
 
     const isProd = isProdEnv();
-    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
+    let tenantResult = null;
+    try {
+      tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
+    } catch (e) {
+      if (isDebugVapiToolEnabled()) {
+        console.error('[VAPI_TOOL][debug] tenant resolve threw', { message: e?.message || String(e) });
+      }
+      return res.status(isProd ? 400 : 200).json({
+        success: false,
+        error: 'UNKNOWN_TENANT',
+        message_cs: 'Nepodařilo se určit podnik pro toto volání.',
+      });
+    }
     const businessId = tenantResult.tenantId || null;
 
     if (!businessId) {
@@ -1098,6 +1131,16 @@ router.post('/book_appointment', async (req, res) => {
         success: false,
         error: 'UNKNOWN_TENANT',
         message_cs: 'Omlouvám se, nepodařilo se určit salon pro tento požadavek.',
+      });
+    }
+
+    if (isDebugVapiToolEnabled()) {
+      const extracted = extractCalledNumberDetailed(body);
+      console.log('[VAPI_TOOL][debug] book_appointment incoming', {
+        headers: pickVapiToolDebugHeaders(req),
+        calledNumber: extracted?.calledNumber ?? null,
+        calledNumberSourcePath: extracted?.sourcePath ?? null,
+        body,
       });
     }
 
@@ -1395,7 +1438,16 @@ router.post('/find_appointments', async (req, res) => {
     console.log('[VAPI_TOOL] find_appointments request', body);
 
     const isProd = isProdEnv();
-    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
+    let tenantResult = null;
+    try {
+      tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
+    } catch {
+      return res.status(isProd ? 400 : 200).json({
+        success: false,
+        error: 'UNKNOWN_TENANT',
+        message_cs: 'Nepodařilo se určit podnik pro toto volání.',
+      });
+    }
     const businessId = tenantResult.tenantId || null;
 
     if (!businessId) {
@@ -1566,7 +1618,16 @@ router.post('/update_appointment', async (req, res) => {
 
     const isProd = isProdEnv();
     const body = req.body || {};
-    const tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
+    let tenantResult = null;
+    try {
+      tenantResult = await resolveTenantForVapi(body, { allowDbLookup: true });
+    } catch {
+      return res.status(isProd ? 400 : 200).json({
+        success: false,
+        error: 'UNKNOWN_TENANT',
+        message_cs: 'Nepodařilo se určit podnik pro toto volání.',
+      });
+    }
     const businessId = tenantResult.tenantId || null;
 
     if (!businessId) {
